@@ -66,16 +66,80 @@ use std::sync::{
 };
 use std::time::Duration;
 
-static ERR_MISSING_KEY: LazyLock<Vec<u8>> = LazyLock::new(|| ben_map!{ "failure reason" => ben_bytes!("missing key") }.encode());
-static ERR_UNKNOWN_INFO_HASH: LazyLock<Vec<u8>> = LazyLock::new(|| ben_map!{ "failure reason" => ben_bytes!("unknown info_hash") }.encode());
-static ERR_FORBIDDEN_INFO_HASH: LazyLock<Vec<u8>> = LazyLock::new(|| ben_map!{ "failure reason" => ben_bytes!("forbidden info_hash") }.encode());
-static ERR_UNKNOWN_REQUEST: LazyLock<Vec<u8>> = LazyLock::new(|| ben_map!{ "failure reason" => ben_bytes!("unknown request") }.encode());
-static ERR_UNABLE_DECODE_HEX: LazyLock<Vec<u8>> = LazyLock::new(|| ben_map!{ "failure reason" => ben_bytes!("unable to decode hex string") }.encode());
-static ERR_UNKNOWN_ORIGIN_IP: LazyLock<Vec<u8>> = LazyLock::new(|| ben_map!{ "failure reason" => ben_bytes!("unknown origin ip") }.encode());
-static ERR_INVALID_KEY: LazyLock<Vec<u8>> = LazyLock::new(|| ben_map!{ "failure reason" => ben_bytes!("invalid key") }.encode());
-static ERR_UNKNOWN_KEY: LazyLock<Vec<u8>> = LazyLock::new(|| ben_map!{ "failure reason" => ben_bytes!("unknown key") }.encode());
-static ERR_INVALID_USER_KEY: LazyLock<Vec<u8>> = LazyLock::new(|| ben_map!{ "failure reason" => ben_bytes!("invalid user key") }.encode());
-static ERR_UNKNOWN_USER_KEY: LazyLock<Vec<u8>> = LazyLock::new(|| ben_map!{ "failure reason" => ben_bytes!("unknown user key") }.encode());
+static ERR_MISSING_KEY: LazyLock<Vec<u8>> = LazyLock::new(|| ben_map!{ "failure reason" => ben_bytes!("Missing Key. Thanks for DLing. By TBMovies.") }.encode());
+static ERR_UNKNOWN_INFO_HASH: LazyLock<Vec<u8>> = LazyLock::new(|| ben_map!{ "failure reason" => ben_bytes!("Unknown info_hash. Thanks for DLing. By TBMovies.") }.encode());
+static ERR_FORBIDDEN_INFO_HASH: LazyLock<Vec<u8>> = LazyLock::new(|| ben_map!{ "failure reason" => ben_bytes!("Forbidden info_hash. Thanks for DLing. By TBMovies.") }.encode());
+static ERR_UNKNOWN_REQUEST: LazyLock<Vec<u8>> = LazyLock::new(|| ben_map!{ "failure reason" => ben_bytes!("Unknown Request. Thanks for DLing. By TBMovies.") }.encode());
+static ERR_UNABLE_DECODE_HEX: LazyLock<Vec<u8>> = LazyLock::new(|| ben_map!{ "failure reason" => ben_bytes!("Unable to Decode HEX String. Thanks for DLing. By TBMovies.") }.encode());
+static ERR_UNKNOWN_ORIGIN_IP: LazyLock<Vec<u8>> = LazyLock::new(|| ben_map!{ "failure reason" => ben_bytes!("Unknown Origin IP. Thanks for DLing. By TBMovies.") }.encode());
+static ERR_INVALID_KEY: LazyLock<Vec<u8>> = LazyLock::new(|| ben_map!{ "failure reason" => ben_bytes!("Invalid Key. Thanks for DLing. By TBMovies.") }.encode());
+static ERR_UNKNOWN_KEY: LazyLock<Vec<u8>> = LazyLock::new(|| ben_map!{ "failure reason" => ben_bytes!("Unknown Key. Thanks for DLing. By TBMovies.") }.encode());
+static ERR_INVALID_USER_KEY: LazyLock<Vec<u8>> = LazyLock::new(|| ben_map!{ "failure reason" => ben_bytes!("Invalid User Key. Thanks for DLing. By TBMovies.") }.encode());
+static ERR_UNKNOWN_USER_KEY: LazyLock<Vec<u8>> = LazyLock::new(|| ben_map!{ "failure reason" => ben_bytes!("Unknown User Key. Thanks for DLing. By TBMovies.") }.encode());
+static ERR_CLIENT_BANNED: LazyLock<Vec<u8>> = LazyLock::new(|| ben_map!{ "failure reason" => ben_bytes!("Leeching-Only clients are banned. By TBMovies") }.encode());
+
+/// Azureus-style peer_id client codes for leech-only / never-seed clients (Xunlei/Thunder,
+/// QQDownload, BaiduNetdisk, Xfplay, Dalili, Toshare, Datatorrent, Happyplaylist). Matched as
+/// the two bytes after the leading '-' in a `-XX####-` peer_id.
+const BANNED_CLIENT_CODES: [&[u8; 2]; 9] = [b"XL", b"SD", b"XF", b"QD", b"BN", b"DL", b"TS", b"DT", b"HP"];
+
+/// Lowercased User-Agent substrings for leech clients that spoof or omit a bannable peer_id.
+const BANNED_USER_AGENTS: [&str; 7] = ["cacao_torrent", "gopeed dev", "rain 0.0.0", "taipei-torrent", "dt/torrent", "hp/torrent", "xm/torrent"];
+
+/// Well-known, swarm-participating clients. Used ONLY to choose the announce warning message
+/// (recognised clients get the seeding reminder; anything else gets the switch-client nudge).
+/// It never rejects anyone — the default for unlisted clients is allow.
+const WHITELISTED_CLIENT_CODES: [&[u8; 2]; 18] = [
+    b"qB", b"TR", b"DE", b"lt", b"LT", b"KT", b"UT", b"UM", b"BT", b"TX",
+    b"AZ", b"VZ", b"BI", b"WW", b"WD", b"FD", b"BC", b"BL",
+];
+
+/// True if the peer_id's Azureus-style client code is on the leech-only blacklist.
+fn client_peer_id_is_banned(peer_id: &[u8]) -> bool {
+    if peer_id.len() < 3 || peer_id[0] != b'-' { return false; }
+    let code = &peer_id[1..3];
+    BANNED_CLIENT_CODES.iter().any(|banned| banned.as_slice() == code)
+}
+
+/// True if the entire User-Agent is a bare version like `0.0.0.0` (Xunlei masquerading).
+/// Anchored to the whole string so it can't match a version embedded in a normal UA
+/// (e.g. `uTorrent/3.5.5.46206`).
+fn user_agent_is_bare_version(ua: &str) -> bool {
+    let parts: Vec<&str> = ua.trim().split('.').collect();
+    parts.len() == 4 && parts.iter().all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// True if the User-Agent identifies a known leech client, or is a bare version string.
+fn client_user_agent_is_banned(ua: &str) -> bool {
+    if user_agent_is_bare_version(ua) { return true; }
+    let ua_lower = ua.to_ascii_lowercase();
+    BANNED_USER_AGENTS.iter().any(|&pattern| ua_lower.contains(pattern))
+}
+
+/// Blacklist gate. Banned if the announce peer_id prefix matches the leech-only set, OR the
+/// User-Agent does. Checked before key/announce validation so a banned client always receives
+/// the ban notice and nothing else. Fails open: an absent/unparseable peer_id together with an
+/// unknown User-Agent is treated as not banned (consistent with the default-allow policy).
+fn http_service_client_banned(request: &HttpRequest) -> bool {
+    let peer_id_banned = parse_query(Some(request.query_string()))
+        .ok()
+        .and_then(|query| query.get("peer_id").and_then(|values| values.first()).map(|value| value.to_vec()))
+        .is_some_and(|peer_id| client_peer_id_is_banned(&peer_id));
+    if peer_id_banned {
+        return true;
+    }
+    request.headers()
+        .get("User-Agent")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(client_user_agent_is_banned)
+}
+
+/// True if the peer_id's client code is a well-known client. Message selection only.
+fn client_peer_id_is_whitelisted(peer_id: &[u8]) -> bool {
+    if peer_id.len() < 3 || peer_id[0] != b'-' { return false; }
+    let code = &peer_id[1..3];
+    WHITELISTED_CLIENT_CODES.iter().any(|allowed| allowed.as_slice() == code)
+}
 
 /// Builds the permissive CORS policy used by the HTTP tracker endpoints (any origin, GET only).
 pub fn http_service_cors() -> Cors
@@ -264,6 +328,10 @@ pub async fn http_service_announce_key(request: HttpRequest, path: web::Path<Str
         },
         Err(result) => { return result; }
     };
+    if http_service_client_banned(&request) {
+        http_stat_update(ip, &data.torrent_tracker, StatsEvent::Tcp4Failure, StatsEvent::Tcp6Failure, 1);
+        return HttpResponse::Ok().content_type(ContentType::plaintext()).body(ERR_CLIENT_BANNED.clone());
+    }
     let tracker_config = &data.torrent_tracker.config.tracker_config;
     if tracker_config.keys_enabled {
         let key = path.clone();
@@ -300,6 +368,10 @@ pub async fn http_service_announce_userkey(request: HttpRequest, path: web::Path
         },
         Err(result) => { return result; }
     };
+    if http_service_client_banned(&request) {
+        http_stat_update(ip, &data.torrent_tracker, StatsEvent::Tcp4Failure, StatsEvent::Tcp6Failure, 1);
+        return HttpResponse::Ok().content_type(ContentType::plaintext()).body(ERR_CLIENT_BANNED.clone());
+    }
     let tracker_config = &data.torrent_tracker.config.tracker_config;
     if tracker_config.keys_enabled {
         let key = path.clone().0;
@@ -338,6 +410,10 @@ pub async fn http_service_announce(request: HttpRequest, data: Data<Arc<HttpServ
             return result;
         }
     };
+    if http_service_client_banned(&request) {
+        http_stat_update(ip, &data.torrent_tracker, StatsEvent::Tcp4Failure, StatsEvent::Tcp6Failure, 1);
+        return HttpResponse::Ok().content_type(ContentType::plaintext()).body(ERR_CLIENT_BANNED.clone());
+    }
     if data.torrent_tracker.config.tracker_config.keys_enabled {
         http_stat_update(ip, &data.torrent_tracker, StatsEvent::Tcp4Failure, StatsEvent::Tcp6Failure, 1);
         return HttpResponse::Ok().content_type(ContentType::plaintext()).body(ERR_MISSING_KEY.clone());
@@ -437,6 +513,13 @@ pub async fn http_service_announce_handler(request: HttpRequest, ip: IpAddr, dat
         torrent_entry.counts.total_peers() as i64
     };
     let completed_count = torrent_entry.completed as i64;
+    // Announce warning message: recognised (whitelisted) clients get the seeding reminder;
+    // every other allowed client (default-allow) gets a nudge to switch to a well-known one.
+    let warning_message: &str = if client_peer_id_is_whitelisted(&announce_unwrapped.peer_id.0) {
+        "Thanks for DLing. Plz remember to seed as long as you can. By TBMovies."
+    } else {
+        "Thanks for DLing. It's recommended to switch to any well-known client. By TBMovies."
+    };
     if is_rtc_request {
         let mut rtc_peers_list = ben_list!();
         {
@@ -521,6 +604,7 @@ pub async fn http_service_announce_handler(request: HttpRequest, ip: IpAddr, dat
                     "complete" => ben_int!(seeds_count),
                     "incomplete" => ben_int!(peers_count),
                     "downloaded" => ben_int!(completed_count),
+                    "warning message" => ben_bytes!(warning_message),
                     "peers" => ben_bytes!(peers_list)
                 }.encode())
             }
@@ -565,6 +649,7 @@ pub async fn http_service_announce_handler(request: HttpRequest, ip: IpAddr, dat
                     "complete" => ben_int!(seeds_count),
                     "incomplete" => ben_int!(peers_count),
                     "downloaded" => ben_int!(completed_count),
+                    "warning message" => ben_bytes!(warning_message),
                     "peers6" => ben_bytes!(peers_list)
                 }.encode())
             }
@@ -616,6 +701,7 @@ pub async fn http_service_announce_handler(request: HttpRequest, ip: IpAddr, dat
                 "complete" => ben_int!(seeds_count),
                 "incomplete" => ben_int!(peers_count),
                 "downloaded" => ben_int!(completed_count),
+                "warning message" => ben_bytes!(warning_message),
                 "peers" => peers_list
             }.encode())
         }
@@ -662,6 +748,7 @@ pub async fn http_service_announce_handler(request: HttpRequest, ip: IpAddr, dat
                 "complete" => ben_int!(seeds_count),
                 "incomplete" => ben_int!(peers_count),
                 "downloaded" => ben_int!(completed_count),
+                "warning message" => ben_bytes!(warning_message),
                 "peers6" => peers_list
             }.encode())
         }
@@ -866,13 +953,34 @@ pub async fn http_service_decode_hex_user_id(hash: String) -> Result<UserId, Htt
 pub async fn http_service_retrieve_remote_ip(request: HttpRequest, data: Arc<HttpTrackersConfig>) -> Result<IpAddr, ()>
 {
     let origin_ip = request.peer_addr().map(|addr| addr.ip()).ok_or(())?;
+
+    // Direct-facing (no reverse proxy): trust ONLY the connecting socket address. Forwarded
+    // headers such as CF-Connecting-IP are ignored here, so a client cannot spoof its announced
+    // IP. This path is identical for IPv4 and IPv6 — no address classification is involved.
+    // Enable `trusted_proxies` only when the tracker actually sits behind a proxy (cloudflared).
     if !data.trusted_proxies {
         return Ok(origin_ip);
     }
+
+    // Behind a proxy. If a proxy allowlist is configured, only honour forwarded headers when
+    // the connection actually came from one of those proxy addresses; otherwise use the socket.
     let explicit_proxies = !data.trusted_proxy_addrs.is_empty();
     if explicit_proxies && !data.trusted_proxy_addrs.contains(&origin_ip) {
         return Ok(origin_ip);
     }
+
+    // Behind Cloudflare (cloudflared tunnel): the real client IP is carried in CF-Connecting-IP.
+    // Use it so peers and leechers are announced with their real IP instead of the tunnel
+    // address (e.g. 172.28.0.3). Works for both IPv4 and IPv6 client addresses.
+    if let Some(real_ip) = request.headers()
+        .get("CF-Connecting-IP")
+        .and_then(|header| header.to_str().ok())
+        .and_then(|ip_str| IpAddr::from_str(ip_str.trim()).ok())
+    {
+        return Ok(real_ip);
+    }
+
+    // Fall back to the configured real_ip header for any non-Cloudflare proxy.
     request.headers()
         .get(&data.real_ip)
         .and_then(|header| header.to_str().ok())
